@@ -19,13 +19,17 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "adc.h"
+#include "dac.h"
+#include "dma.h"
 #include "i2c.h"
+#include "tim.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include "liquidcrystal_i2c.h"
 /* USER CODE END Includes */
 
@@ -47,11 +51,21 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-ADC_HandleTypeDef hadc1;
 
 
 int adc_raw = 0;
 float voltage = 0.0f;
+
+#define SINE_LEN   48
+#define ADC_MAX    3204.0f   // lower this to the highest ADC value you see in bright light
+#define NUM_LEVELS 9
+#define HYST       0.15f     // fraction of a band you must cross before switching
+uint16_t sine_table[SINE_LEN];
+
+// Level 1 (dark) to level 9 (bright): C4 D4 E4 F4 G4 A4 B4 C5 D5
+const float level_freq[NUM_LEVELS] = {0, 294, 330, 349, 392, 440, 494, 523, 587};
+uint8_t audio_on = 1;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -66,16 +80,47 @@ uint32_t Read_OPT101(void)
 {
     uint32_t value = 0;
 
-    HAL_ADC_Start(&hadc1);
+    HAL_ADC_Start(&hadc1); //initialize ADC
 
     if (HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK)
     {
-        value = HAL_ADC_GetValue(&hadc1);
+        value = HAL_ADC_GetValue(&hadc1); //gets reading from the pin the photodiode is connected to
     }
 
     HAL_ADC_Stop(&hadc1);
     return value;
 }
+
+void set_pitch(float freq)
+{
+
+    // pitch = 72 MHz / ((ARR + 1) * SINE_LEN)
+    uint32_t arr = (uint32_t)(72000000.0f / (freq * SINE_LEN)) - 1;
+    __HAL_TIM_SET_AUTORELOAD(&htim6, arr);
+}
+
+void audio_output(uint8_t enable) //parameter is either 0 or 1 to run the specific loop.
+{
+    if (enable) // 1
+    {
+        for (int i = 0; i < SINE_LEN; i++)
+            sine_table[i] = (uint16_t)(2048.0f +
+                1500.0f * sinf(2.0f * 3.14159265f * i / SINE_LEN)); //calculation of sine wave for the DAC to initialize
+
+        HAL_DAC_Start_DMA(&hdac1, DAC_CHANNEL_1,
+                          (uint32_t *)sine_table,
+                          SINE_LEN,
+                          DAC_ALIGN_12B_R);
+
+        HAL_TIM_Base_Start(&htim6);
+    }
+    else // 0
+    {
+        HAL_TIM_Base_Stop(&htim6);
+        HAL_DAC_Stop_DMA(&hdac1, DAC_CHANNEL_1);
+    }
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -107,11 +152,15 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_ADC1_Init();
   MX_I2C1_Init();
+  MX_DAC1_Init();
+  MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
   HD44780_Init(2);
+  audio_output(audio_on);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -121,47 +170,77 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+	    if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET) //B1 button check
+	    {
+	        audio_on = !audio_on; //inverts audio_on current value
+	        audio_output(audio_on); //Starts/Ends DAC to output audio
+	        HAL_Delay(200);
+	    }
+
 	  adc_raw = Read_OPT101();
+
+
+
 	  // Convert to voltage (Vref = 3.3V, 12-bit resolution)
 	  voltage = (adc_raw * 3.3f) / 4095.0f;
-	  printf( "ADC: %d  Voltage: %.3f V\r\n", adc_raw, voltage);
+	  printf( "ADC: %d  Voltage: %.3f V AUDIO : %d \r\n", adc_raw, voltage, audio_on);
+
 	    char line2[17];
 
 	    if (adc_raw < 356)
 	    {
 	        strcpy(line2, "Level 1        ");
+	        set_pitch(level_freq[0]);
 	    }
 	    else if (adc_raw < 712)
 	    {
 	        strcpy(line2, "Level 2        ");
+
+	        set_pitch(level_freq[1]);
+
 	    }
 	    else if (adc_raw < 1068)
 	    {
 	        strcpy(line2, "Level 3        ");
+
+	        set_pitch(level_freq[2]);
 	    }
 	    else if (adc_raw < 1424)
 	    {
 	        strcpy(line2, "Level 4        ");
+
+	        set_pitch(level_freq[3]);
 	    }
 	    else if (adc_raw < 1780)
 	    {
 	        strcpy(line2, "Level 5        ");
+
+	        set_pitch(level_freq[4]);
 	    }
 	    else if (adc_raw < 2136)
 	    {
 	        strcpy(line2, "Level 6        ");
+
+	        set_pitch(level_freq[5]);
 	    }
 	    else if (adc_raw < 2492)
 	    {
 	        strcpy(line2, "Level 7        ");
+
+	        set_pitch(level_freq[6]);
 	    }
 	    else if (adc_raw < 2848)
 	    {
 	        strcpy(line2, "Level 8        ");
+
+	        set_pitch(level_freq[7]);
 	    }
 	    else
 	    {
 	        strcpy(line2, "Level 9        ");
+
+	        set_pitch(level_freq[8]);
 	    }
 
 	    char line1[17];
